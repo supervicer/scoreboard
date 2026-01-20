@@ -1,0 +1,14 @@
+{
+  "name": "badminton-score",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server/index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.6.0",
+    "cookie-parser": "^1.4.6",
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}

@@ -1,0 +1,12 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+      - ./server/config.local.json:/app/server/config.local.json:ro
+    environment:
+      - DB_PATH=/app/data/app.db
+      - PORT=3000
+    restart: unless-stopped

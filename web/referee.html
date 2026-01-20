@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>裁判台</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100">
+  <div class="max-w-6xl mx-auto p-4">
+    <div class="flex items-end justify-between gap-3 flex-wrap">
+      <div>
+        <h1 class="text-xl font-extrabold">裁判台</h1>
+        <p class="text-sm text-slate-300 mt-1">登录后可生成赛程、开始比赛、逐局点选胜方（手机友好）</p>
+      </div>
+      <a class="text-sm text-slate-200 underline" href="/">返回观众页</a>
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-4 mt-4">
+      <div class="bg-white/95 text-slate-900 rounded-2xl p-4 shadow">
+        <h2 class="font-bold">裁判登录</h2>
+        <div class="grid grid-cols-1 gap-2 mt-2">
+          <input id="u" class="border rounded-xl px-3 py-2" placeholder="用户名"/>
+          <input id="p" class="border rounded-xl px-3 py-2" type="password" placeholder="密码"/>
+          <button id="login" class="rounded-xl bg-slate-900 text-white py-2 font-bold">登录</button>
+          <button id="logout" class="rounded-xl bg-slate-200 py-2 font-bold hidden">退出</button>
+          <div id="msg" class="text-sm"></div>
+        </div>
+      </div>
+
+      <div class="bg-white/95 text-slate-900 rounded-2xl p-4 shadow">
+        <h2 class="font-bold">初始化与赛程</h2>
+        <div class="grid grid-cols-2 gap-2 mt-2">
+          <input id="t1" class="border rounded-xl px-3 py-2" placeholder="队伍1"/>
+          <input id="t2" class="border rounded-xl px-3 py-2" placeholder="队伍2"/>
+          <input id="t3" class="border rounded-xl px-3 py-2" placeholder="队伍3"/>
+          <input id="t4" class="border rounded-xl px-3 py-2" placeholder="队伍4"/>
+        </div>
+        <div class="flex gap-2 mt-3 flex-wrap">
+          <button id="initTeams" class="rounded-xl bg-slate-900 text-white px-4 py-2 font-bold">保存队名</button>
+          <button id="gen" class="rounded-xl bg-slate-200 px-4 py-2 font-bold">生成大循环赛程</button>
+          <button id="exportCsv" class="rounded-xl bg-slate-200 px-4 py-2 font-bold">导出CSV</button>
+          <button id="exportPng" class="rounded-xl bg-slate-200 px-4 py-2 font-bold">导出战报图片</button>
+        </div>
+        <div id="initMsg" class="text-sm mt-2 text-slate-700"></div>
+      </div>
+    </div>
+
+    <div class="bg-white/95 text-slate-900 rounded-2xl p-4 shadow mt-4">
+      <h2 class="font-bold">比赛录分（进行中置顶｜点“进入计分”适配手机）</h2>
+      <div id="matches" class="mt-3"></div>
+    </div>
+  </div>
+
+<script>
+const socket = io();
+const $ = (id)=>document.getElementById(id);
+
+async function api(path, body){
+  const r = await fetch(path, {
+    method: "POST",
+    headers: {"content-type":"application/json"},
+    body: JSON.stringify(body||{})
+  });
+  const text = await r.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw:text }; }
+  if (!r.ok) throw new Error(data.msg || data.error || text);
+  return data;
+}
+
+async function fetchState(){
+  const r = await fetch("/api/state");
+  return await r.json();
+}
+
+const typeMap = {MD:"男双",WD:"女双",XD:"混双",MS:"男单",WS:"女单","3v3A":"3v3A(2男1女)","3v3B":"3v3B(2女1男)"};
+
+function teamName(teams, id){
+  return (teams.find(t=>t.id===id)||{}).name || ("队伍"+id);
+}
+
+function matchScore(games, matchId, aId, bId){
+  const g = games.filter(x=>x.match_id===matchId);
+  let aw=0,bw=0;
+  for(const x of g){
+    if(x.winner_team_id===aId) aw++;
+    if(x.winner_team_id===bId) bw++;
+  }
+  return {aw,bw, g};
+}
+
+// ====== 手机友好：列表 -> 单场模式 ======
+let activeMatchId = null;
+
+function renderRefereeMatches(state){
+  const { teams, matches, games } = state;
+
+  // ✅ 进行中置顶
+  const order = { live: 0, scheduled: 1, finished: 2 };
+  const sorted = [...matches].sort((a,b)=>{
+    const da = order[a.status] ?? 9;
+    const db = order[b.status] ?? 9;
+    if (da !== db) return da - db;
+    return a.id - b.id;
+  });
+
+  // 单场模式
+  if (activeMatchId) {
+    const m = matches.find(x=>x.id===activeMatchId);
+    if (!m) { activeMatchId=null; return renderRefereeMatches(state); }
+
+    const A = teamName(teams,m.teamA_id), B = teamName(teams,m.teamB_id);
+    const { aw, bw, g } = matchScore(games,m.id,m.teamA_id,m.teamB_id);
+
+    const badge = m.status==="live" ? "bg-emerald-600 text-white" : (m.status==="finished" ? "bg-slate-700 text-white" : "bg-slate-200 text-slate-800");
+
+    return `
+      <div class="border rounded-2xl p-4">
+        <div class="flex items-center justify-between gap-2 flex-wrap">
+          <div>
+            <div class="text-lg font-extrabold">${A} vs ${B}</div>
+            <div class="mt-1 text-sm">当前比分：<b>${aw}</b> : <b>${bw}</b>（7局）</div>
+            <div class="mt-1"><span class="text-xs px-2 py-1 rounded-full ${badge}">${m.status}</span></div>
+          </div>
+          <div class="flex gap-2 flex-wrap">
+            <button class="px-4 py-2 rounded-xl bg-slate-200 font-bold" onclick="backToList()">返回列表</button>
+            <button class="px-4 py-2 rounded-xl bg-slate-900 text-white font-bold" onclick="setStatus(${m.id},'live')">开始</button>
+            <button class="px-4 py-2 rounded-xl bg-slate-700 text-white font-bold" onclick="setStatus(${m.id},'finished')">结束</button>
+            <button class="px-4 py-2 rounded-xl bg-slate-200 font-bold" onclick="setStatus(${m.id},'scheduled')">重置状态</button>
+          </div>
+        </div>
+
+        <div class="flex gap-2 mt-3 flex-wrap">
+          <button class="px-4 py-2 rounded-xl bg-rose-600 text-white font-bold" onclick="clearAll(${m.id})">重置本场（清空7局）</button>
+        </div>
+
+        <div class="mt-4 space-y-3">
+          ${g.map(x=>{
+            const w = x.winner_team_id ? teamName(teams,x.winner_team_id) : "未决";
+            return `
+              <div class="border rounded-2xl p-3">
+                <div class="flex items-center justify-between gap-2 flex-wrap">
+                  <div>
+                    <div class="font-extrabold">${x.game_no}. ${typeMap[x.game_type]||x.game_type}</div>
+                    <div class="text-sm text-slate-600">胜方：<span class="font-bold">${w}</span></div>
+                  </div>
+                  <button class="px-3 py-2 rounded-xl bg-slate-200 font-bold" onclick="clearOne(${m.id},${x.game_no})">撤销本局</button>
+                </div>
+
+                <div class="grid grid-cols-2 gap-2 mt-3">
+                  <button class="py-3 rounded-2xl bg-slate-900 text-white font-extrabold text-base" onclick="win(${m.id},${x.game_no},${m.teamA_id})">${A} 胜</button>
+                  <button class="py-3 rounded-2xl bg-slate-900 text-white font-extrabold text-base" onclick="win(${m.id},${x.game_no},${m.teamB_id})">${B} 胜</button>
+                </div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  // 列表模式
+  return `
+    <div class="grid md:grid-cols-2 gap-3">
+      ${sorted.map(m=>{
+        const A = teamName(teams,m.teamA_id), B = teamName(teams,m.teamB_id);
+        const { aw, bw } = matchScore(games,m.id,m.teamA_id,m.teamB_id);
+        const badge = m.status==="live" ? "bg-emerald-600 text-white" : (m.status==="finished" ? "bg-slate-700 text-white" : "bg-slate-200 text-slate-800");
+        return `
+          <div class="border rounded-2xl p-4">
+            <div class="flex items-center justify-between">
+              <div class="font-extrabold">${A} vs ${B}</div>
+              <span class="text-xs px-2 py-1 rounded-full ${badge}">${m.status}</span>
+            </div>
+            <div class="mt-2 text-sm">比分：<b>${aw}</b> : <b>${bw}</b></div>
+            <div class="mt-3 flex gap-2 flex-wrap">
+              <button class="px-4 py-2 rounded-xl bg-slate-900 text-white font-bold" onclick="openMatch(${m.id})">进入计分</button>
+              <button class="px-4 py-2 rounded-xl bg-slate-200 font-bold" onclick="setStatus(${m.id},'live')">开始</button>
+              <button class="px-4 py-2 rounded-xl bg-slate-200 font-bold" onclick="setStatus(${m.id},'finished')">结束</button>
+            </div>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+window.openMatch = (id)=>{ activeMatchId = id; render(); };
+window.backToList = ()=>{ activeMatchId = null; render(); };
+
+window.win = async (matchId, gameNo, winnerTeamId)=>{
+  try{
+    await api(`/api/match/${matchId}/game/${gameNo}/winner`, { winnerTeamId });
+  }catch(e){ alert(e.message||String(e)); }
+};
+
+window.setStatus = async (matchId, status)=>{
+  try{
+    await api(`/api/match/${matchId}/status`, { status });
+  }catch(e){ alert(e.message||String(e)); }
+};
+
+window.clearOne = async (matchId, gameNo)=>{
+  try{
+    await api(`/api/match/${matchId}/game/${gameNo}/clear`, {});
+  }catch(e){ alert(e.message||String(e)); }
+};
+
+window.clearAll = async (matchId)=>{
+  if(!confirm("确定清空本场7局？")) return;
+  try{
+    await api(`/api/match/${matchId}/clear-all`, {});
+  }catch(e){ alert(e.message||String(e)); }
+};
+
+async function render(){
+  const state = await fetchState();
+  const { teams } = state;
+
+  // 回填队名输入框
+  if (teams.length>=4) {
+    $("t1").value = teams[0].name; $("t2").value = teams[1].name;
+    $("t3").value = teams[2].name; $("t4").value = teams[3].name;
+  }
+
+  $("matches").innerHTML = renderRefereeMatches(state);
+}
+
+$("login").onclick = async ()=>{
+  $("msg").textContent = "";
+  try{
+    await api("/api/login", { username: $("u").value.trim(), password: $("p").value });
+    $("login").classList.add("hidden");
+    $("logout").classList.remove("hidden");
+    $("msg").textContent = "已登录";
+    $("msg").className = "text-sm text-emerald-600";
+  }catch(e){
+    $("msg").textContent = e.message || String(e);
+    $("msg").className = "text-sm text-rose-600";
+  }
+};
+
+$("logout").onclick = async ()=>{
+  await api("/api/logout", {});
+  $("login").classList.remove("hidden");
+  $("logout").classList.add("hidden");
+  $("msg").textContent = "已退出";
+  $("msg").className = "text-sm text-slate-600";
+};
+
+// 初始化队名
+$("initTeams").onclick = async ()=>{
+  try{
+    await api("/api/init-teams", { names:[$("t1").value,$("t2").value,$("t3").value,$("t4").value] });
+    $("initMsg").textContent = "✅ 已保存队名";
+    $("initMsg").className = "text-sm mt-2 text-emerald-600";
+  }catch(e){
+    $("initMsg").textContent = "❌ " + (e.message || String(e));
+    $("initMsg").className = "text-sm mt-2 text-rose-600";
+  }
+};
+
+// 生成赛程
+$("gen").onclick = async ()=>{
+  try{
+    await api("/api/generate-schedule", {});
+    activeMatchId = null;
+    $("initMsg").textContent = "✅ 已生成大循环赛程";
+    $("initMsg").className = "text-sm mt-2 text-emerald-600";
+  }catch(e){
+    $("initMsg").textContent = "❌ " + (e.message || String(e));
+    $("initMsg").className = "text-sm mt-2 text-rose-600";
+  }
+};
+
+// 导出 CSV（后端生成，需已登录）
+$("exportCsv").onclick = ()=>{
+  window.open("/api/export.csv", "_blank");
+};
+
+// 导出 PNG（前端生成）
+async function exportPng(){
+  const state = await fetchState();
+  const { teams, matches, games, standings } = state;
+
+  const tn = (id)=> teamName(teams,id);
+
+  const order = { live: 0, scheduled: 1, finished: 2 };
+  const sorted = [...matches].sort((a,b)=>{
+    const da = order[a.status] ?? 9;
+    const db = order[b.status] ?? 9;
+    if (da !== db) return da - db;
+    return a.id - b.id;
+  });
+
+  const W = 1080;
+  const pad = 48;
+  const lineH = 40;
+  const H = 360 + (standings.table.length+2)*lineH + (sorted.length*lineH*2) + 140;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d");
+
+  // background
+  ctx.fillStyle = "#0b1020";
+  ctx.fillRect(0,0,W,H);
+
+  // title
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 44px system-ui, -apple-system, Segoe UI, Roboto";
+  ctx.fillText("羽毛球比赛战报", pad, 90);
+
+  ctx.font = "24px system-ui, -apple-system, Segoe UI, Roboto";
+  ctx.fillStyle = "#cbd5e1";
+  ctx.fillText(new Date().toLocaleString(), pad, 130);
+
+  let y = 190;
+
+  // standings
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 30px system-ui, -apple-system, Segoe UI, Roboto";
+  ctx.fillText("积分榜（总积分=赢局数，同分看胜负关系）", pad, y);
+  y += 52;
+
+  ctx.font = "26px system-ui, -apple-system, Segoe UI, Roboto";
+  standings.table.forEach((r,i)=>{
+    ctx.fillStyle = "#e8eefc";
+    ctx.fillText(`${i+1}. ${r.name}`, pad, y);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(`${r.points} 分`, W - pad - 140, y);
+    y += lineH;
+  });
+
+  y += 28;
+
+  // matches
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 30px system-ui, -apple-system, Segoe UI, Roboto";
+  ctx.fillText("赛程与比分（每场7局，胜局=得分）", pad, y);
+  y += 52;
+
+  ctx.font = "26px system-ui, -apple-system, Segoe UI, Roboto";
+
+  for (const m of sorted) {
+    const g = games.filter(x=>x.match_id===m.id);
+    let aw=0,bw=0;
+    for(const x of g){
+      if(x.winner_team_id===m.teamA_id) aw++;
+      if(x.winner_team_id===m.teamB_id) bw++;
+    }
+
+    const A = tn(m.teamA_id);
+    const B = tn(m.teamB_id);
+
+    ctx.fillStyle = "#e8eefc";
+    ctx.fillText(`#${m.id}  ${A} vs ${B}`, pad, y);
+
+    ctx.fillStyle = m.status==="live" ? "#34d399" : (m.status==="finished" ? "#94a3b8" : "#fbbf24");
+    ctx.fillText(m.status, W - pad - 200, y);
+
+    y += lineH;
+
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(`比分：${aw} : ${bw}`, pad, y);
+
+    y += lineH;
+  }
+
+  const url = canvas.toDataURL("image/png");
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `羽毛球战报_${new Date().toISOString().slice(0,10)}.png`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+$("exportPng").onclick = ()=>{
+  exportPng().catch(e=>alert(e.message||String(e)));
+};
+
+// realtime refresh
+socket.on("refresh", render);
+render();
+</script>
+</body>
+</html>
