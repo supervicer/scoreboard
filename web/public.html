@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>羽毛球计分看板</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100">
+  <div class="max-w-6xl mx-auto p-4">
+    <div class="flex items-end justify-between gap-3 flex-wrap">
+      <div>
+        <h1 class="text-xl font-extrabold">羽毛球挑战赛 · 实时计分看板</h1>
+        <p class="text-sm text-slate-300 mt-1">4队大循环｜每场7局｜每局胜方+1分｜同分看胜负关系</p>
+      </div>
+      <a class="text-sm text-slate-200 underline" href="/referee">裁判入口</a>
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-4 mt-4">
+      <div class="bg-white/95 text-slate-900 rounded-2xl p-4 shadow">
+        <h2 class="font-bold">积分榜</h2>
+        <div id="standings" class="mt-2 text-sm"></div>
+      </div>
+
+      <div class="bg-white/95 text-slate-900 rounded-2xl p-4 shadow">
+        <h2 class="font-bold">赛程与比分（进行中置顶）</h2>
+        <div id="matches" class="mt-2 text-sm space-y-2"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+const $ = (id)=>document.getElementById(id);
+const socket = io();
+
+async function fetchState(){
+  const r = await fetch("/api/state");
+  return await r.json();
+}
+
+function teamName(teams, id){
+  return (teams.find(t=>t.id===id)||{}).name || ("队伍"+id);
+}
+
+function renderStandings(state){
+  const rows = state.standings.table;
+  const html = `
+    <table class="w-full text-left border-separate border-spacing-y-2">
+      <thead><tr class="text-slate-600 text-xs">
+        <th class="px-2">排名</th><th class="px-2">队伍</th><th class="px-2">总积分</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map((r,i)=>`
+          <tr class="bg-slate-50 rounded-xl">
+            <td class="px-2 py-2 font-bold">${i+1}</td>
+            <td class="px-2 py-2">${r.name}</td>
+            <td class="px-2 py-2 font-extrabold">${r.points}</td>
+          </tr>`).join("")}
+      </tbody>
+    </table>`;
+  $("standings").innerHTML = html;
+}
+
+function matchScore(games, matchId, aId, bId){
+  const g = games.filter(x=>x.match_id===matchId);
+  let aw=0,bw=0;
+  for(const x of g){
+    if(x.winner_team_id===aId) aw++;
+    if(x.winner_team_id===bId) bw++;
+  }
+  return {aw,bw, g};
+}
+
+function renderMatches(state){
+  const { teams, matches, games } = state;
+  const typeMap = {MD:"男双",WD:"女双",XD:"混双",MS:"男单",WS:"女单","3v3A":"3v3A(2男1女)","3v3B":"3v3B(2女1男)"};
+
+  // ✅ 进行中置顶排序
+  const order = { live: 0, scheduled: 1, finished: 2 };
+  const sorted = [...matches].sort((a,b)=>{
+    const da = order[a.status] ?? 9;
+    const db = order[b.status] ?? 9;
+    if (da !== db) return da - db;
+    return a.id - b.id;
+  });
+
+  $("matches").innerHTML = sorted.map(m=>{
+    const A = teamName(teams,m.teamA_id), B = teamName(teams,m.teamB_id);
+    const {aw,bw,g} = matchScore(games,m.id,m.teamA_id,m.teamB_id);
+    const badge = m.status==="live" ? "bg-emerald-600 text-white" : (m.status==="finished" ? "bg-slate-700 text-white" : "bg-slate-200 text-slate-800");
+    return `
+      <div class="border rounded-xl p-3">
+        <div class="flex items-center justify-between gap-2">
+          <div class="font-bold">${A} vs ${B}</div>
+          <span class="text-xs px-2 py-1 rounded-full ${badge}">${m.status}</span>
+        </div>
+        <div class="mt-1 text-sm">比分：<b>${aw}</b> : <b>${bw}</b>（共7局）</div>
+        <div class="mt-2 grid grid-cols-1 gap-1 text-xs text-slate-700">
+          ${g.map(x=>{
+            const w = x.winner_team_id ? teamName(teams,x.winner_team_id) : "未决";
+            return `<div class="flex justify-between">
+              <span>${x.game_no}. ${typeMap[x.game_type]||x.game_type}</span>
+              <span class="font-semibold">${w}</span>
+            </div>`;
+          }).join("")}
+        </div>
+      </div>`;
+  }).join("");
+}
+
+async function refresh(){
+  const state = await fetchState();
+  renderStandings(state);
+  renderMatches(state);
+}
+
+socket.on("refresh", refresh);
+refresh();
+</script>
+</body>
+</html>
